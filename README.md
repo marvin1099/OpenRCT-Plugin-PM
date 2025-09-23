@@ -3,12 +3,12 @@ Main repo: https://codeberg.org/marvin1099/OpenRCT-Plugin-PM
 Backup repo: https://github.com/marvin1099/OpenRCT-Plugin-PM  
 
 This branch is a new way on how to grab the openrct plugins from the webside,  
-using the implemented json request via url parameters.
-Right now Im not working on this but i figured i may as well upload the proof of concept.
-The Readme bellow is just the one of the old plugin downloader.
-As this is not done and probably wont be any time soon i will leave everything else as is.
-Thech the file orct-pldl.py for changes if intrested.
-The proof of concept in this branch only prints all found plugins for now.
+using the implemented json request via url parameters.  
+Right now Im not working on this but i figured i may as well upload the proof of concept.  
+The Readme bellow is just the one of the old plugin downloader.  
+As this is not done and probably wont be any time soon i will leave everything else as is.  
+Thech the file orct-pldl.py for changes if intrested.  
+The proof of concept in this branch only prints all found plugins for now.  
 The proof of concept runs with pure python btw.
 
 
