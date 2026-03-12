@@ -542,10 +542,19 @@ class OpenRCTPluginDownloader:
     def match_installed_files_to_repo(self, installed_plugin, all_files):
         matched_files = []
         unmatched_files = []
+        
         for installed_file in installed_plugin.get('files', []):
+            installed_path = installed_file.get('path', '')
+            installed_clean = self.strip_version_strings(os.path.basename(installed_path))
+            installed_release = installed_file.get('release', False)
+            
             matched = False
             for repo_file in all_files:
-                if repo_file['path'] == installed_file.get('path') and repo_file['release'] == installed_file.get('release'):
+                repo_path = repo_file.get('path', '')
+                repo_clean = self.strip_version_strings(os.path.basename(repo_path))
+                repo_release = repo_file.get('release', False)
+                
+                if installed_clean == repo_clean and installed_release == repo_release:
                     matched_files.append(repo_file)
                     matched = True
                     break
@@ -563,7 +572,12 @@ class OpenRCTPluginDownloader:
 
     def remove_pl_files(self, files_to_remove):
         for file_to_remove in files_to_remove:
-            path_to_remove = os.path.basename(file_to_remove.get("path"))
+            clean_name = file_to_remove.get("clean_name")
+            if clean_name:
+                path_to_remove = clean_name
+            else:
+                path_to_remove = os.path.basename(file_to_remove.get("path", ""))
+            
             try:
                 os.remove(path_to_remove)
             except:
@@ -571,19 +585,48 @@ class OpenRCTPluginDownloader:
             else:
                 print(f"Removed file: {path_to_remove}")
 
+    def strip_version_strings(self, filename):
+        import re
+        name_without_ext = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1]
+        
+        version_patterns = [
+            r'[-_]v?\d+\.\d+\.\d+',
+            r'[-_]v?\d+\.\d+',
+            r'[-_]v?\d+',
+            r'[-_]\d{4}-\d{2}-\d{2}',
+            r'[-_]\d{8,}',
+            r'[-_](alpha|beta|rc)\d*',
+            r'[-_]min$',
+        ]
+        
+        for pattern in version_patterns:
+            name_without_ext = re.sub(pattern, '', name_without_ext, flags=re.IGNORECASE)
+        
+        name_without_ext = re.sub(r'[-_]+', '_', name_without_ext)
+        name_without_ext = name_without_ext.strip('_-')
+        
+        return name_without_ext + ext
+
     def download_files(self, selected_files):
         downloaded_files = []
         for file_info in selected_files:
             try:
                 file_url = file_info.get('url')
-                file_name = os.path.basename(file_info.get('path', 'download.js'))
+                original_filename = os.path.basename(file_info.get('path', 'download.js'))
+                clean_filename = self.strip_version_strings(original_filename)
+                
                 with urllib.request.urlopen(file_url) as response:
                     if response.status != 200:
                         raise Exception(f"Failed to download: {file_info.get('path')} (status {response.status})")
-                    with open(file_name, 'wb') as file:
+                    with open(clean_filename, 'wb') as file:
                         file.write(response.read())
-                downloaded_files.append({"path": file_info['path'], "release": file_info['release']})
-                print(f"Downloaded: {file_name}")
+                downloaded_files.append({
+                    "path": file_info['path'], 
+                    "release": file_info['release'],
+                    "clean_name": clean_filename
+                })
+                print(f"Downloaded: {clean_filename}")
             except Exception as e:
                 print(f"Failed to download: {file_info.get('path')} - {e}")
         return downloaded_files
@@ -773,7 +816,10 @@ class OpenRCTPluginDownloader:
             print(f"Last Updated: {plugin.get('last_updated', 0)}")
             print(f"Downloaded On: {plugin.get('download_time', 0)}")
             for plfile in plugin.get('files', []):
+                clean_name = plfile.get('clean_name', '')
                 opath, fname = os.path.split(plfile.get('path', ''))
+                if clean_name:
+                    fname = clean_name
                 if opath:
                     print(f"  File: {fname}, Online Path: {opath}/, Release: {plfile.get('release', False)}")
                 else:
