@@ -286,12 +286,12 @@ class OpenRCTPluginDownloader:
         with open(self.storefile, 'w') as file:
             json.dump(data, file, indent=4)
 
-    def update_plugins(self, skipcurrent=True):
+    def update_plugins(self, skipcurrent=True, force=False):
         print("Updating plugins")
         for local_plugin in self.local_plugins:
             online_plugin = self.is_plugin_available(local_plugin['name'])
             if online_plugin:
-                self.github_download(online_plugin, skipcurrent)
+                self.github_download(online_plugin, skipcurrent, force)
                 index = self.get_plugin_index_by_name(local_plugin['name'])
                 if index is not None:
                     self.local_plugins[index]['last_updated'] = online_plugin.get('last_updated', 0)
@@ -653,7 +653,7 @@ class OpenRCTPluginDownloader:
             print(f"Error fetching release files: {e}")
         return []
 
-    def github_download(self, plugin, skipcurrent=False):
+    def github_download(self, plugin, skipcurrent=False, force=False):
         url_identifier = plugin.get('url_identifier', '')
 
         if url_identifier:
@@ -678,21 +678,21 @@ class OpenRCTPluginDownloader:
 
         state = self.what_about_plugin(plugin.get('name', ''))
         
-        if state == "Outdated" and skipcurrent:
+        if force:
+            auto_match = True
+            print(f"Reinstalling {plugin.get('name')}")
+        elif state == "Outdated" and skipcurrent:
             auto_match = True
             print(f"Auto-updating {plugin.get('name')} (online is newer)")
         elif state == "Outdated" and not skipcurrent:
+            auto_match = False
             print(f"Online version is newer, will update")
         elif state == "Current" or state == "Overdated":
             if not skipcurrent:
-                print("\nVersion is already up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup")
-                state_select = self.input_with_timeout("Your choice (default 0): ", 20)
-            else:
-                print(f"Skipped {plugin.get('name')} because it was up to date")
-            if not state_select or state_select == "0":
-                return
-            if state_select != "1":
                 state_select = "2"
+            elif skipcurrent:
+                print(f"Skipped {plugin.get('name')} because it was up to date")
+                return
 
         downloaded_plugin = {
             "name": plugin.get('name', ''),
@@ -721,12 +721,34 @@ class OpenRCTPluginDownloader:
 
         selected_files = []
         iplugin = self.is_plugin_installed(plugin.get('name', ''))
-        
+         
         if auto_match and iplugin:
             selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin, all_files)
             if unmatched:
                 print(f"Warning: {len(unmatched)} local file(s) not found online, keeping them")
             print(f"Matched {len(selected_files)} files for update")
+        elif auto_match and not iplugin:
+            selections = self.input_with_timeout("Enter the numbers of the files to download (comma-separated), or '0' to abort: ", 40)
+            print("")
+            if not selections:
+                selections = "1"
+            if selections and selections[0] != '0':
+                try:
+                    selected_indices = selections.split(',')
+                    selected_files = [all_files[int(index)-1] for index in selected_indices if 1 <= int(index) <= len(all_files)]
+                except (ValueError, IndexError):
+                    print("Invalid selection")
+        elif not auto_match and iplugin:
+            selections = self.input_with_timeout("Enter the numbers of the files to download (comma-separated), or '0' to abort: ", 40)
+            print("")
+            if not selections:
+                selections = "1"
+            if selections and selections[0] != '0':
+                try:
+                    selected_indices = selections.split(',')
+                    selected_files = [all_files[int(index)-1] for index in selected_indices if 1 <= int(index) <= len(all_files)]
+                except (ValueError, IndexError):
+                    print("Invalid selection")
         elif state_select == "1" and iplugin:
             selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin, all_files)
             if not all_matched:
@@ -829,13 +851,13 @@ class OpenRCTPluginDownloader:
                     selected_index = int(selection) - 1
                     selected_plugin = search_results[selected_index]
                     print(f"Installing plugin: {selected_plugin.get('name', '')}")
-                    self.github_download(selected_plugin)
+                    self.github_download(selected_plugin, skipcurrent=False)
                     print("")
                 except (ValueError, IndexError):
                     print("Invalid selection. Installation aborted.")
             else:
                 print(f"Installing plugin: {plugin_name}")
-                self.github_download(found_plugin)
+                self.github_download(found_plugin, skipcurrent=False)
                 print("")
         except Exception as e:
             print(f"Error installing plugin: {e}")
@@ -893,8 +915,10 @@ class OpenRCTPluginDownloader:
         if args.idxup or int(time.time()) - int(self.last_config_sync) > int(self.update_plugins_interval):
             self.update_index()
 
-        if args.update or int(time.time()) - int(self.last_update) > int(self.update_plugins_interval):
-            self.update_plugins()
+        if args.update:
+            self.update_plugins(force=True)
+        elif int(time.time()) - int(self.last_update) > int(self.update_plugins_interval):
+            self.update_plugins(skipcurrent=True)
 
         if args.dignore:
             self.dignore = True
