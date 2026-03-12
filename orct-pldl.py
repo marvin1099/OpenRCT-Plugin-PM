@@ -291,15 +291,11 @@ class OpenRCTPluginDownloader:
         for local_plugin in self.local_plugins:
             online_plugin = self.is_plugin_available(local_plugin['name'])
             if online_plugin:
-                combined_info = {
-                    "name": local_plugin['name'],
-                    "download_time": int(time.time()),
-                    "last_updated": online_plugin.get('last_updated', 0),
-                    "files": []
-                }
-                index = self.get_plugin_index_by_name(local_plugin['name'])
-                self.local_plugins[index] = combined_info
                 self.github_download(online_plugin, skipcurrent)
+                index = self.get_plugin_index_by_name(local_plugin['name'])
+                if index is not None:
+                    self.local_plugins[index]['last_updated'] = online_plugin.get('last_updated', 0)
+                    self.local_plugins[index]['download_time'] = int(time.time())
                 print("")
             else:
                 print(f"Plugin '{local_plugin['name']}' not found online.")
@@ -308,14 +304,14 @@ class OpenRCTPluginDownloader:
     def generate_repo_api_url(self, plugin):
         author = plugin.get('author', '')
         name = plugin.get('name', '')
-        
+
         if 'github_url' in plugin:
             gh_url = plugin['github_url']
             if gh_url and 'github.com' in gh_url:
                 parts = gh_url.replace('https://github.com/', '').split('/')
                 if len(parts) >= 2:
                     return f"{self.repo_api_base}/{parts[0]}/{parts[1]}"
-        
+
         return f"{self.repo_api_base}/{author}/{name}"
 
     def load_ignore_list(self):
@@ -481,6 +477,8 @@ class OpenRCTPluginDownloader:
         if self.instant_timeout:
             return None
         print(f"Timeout in {timeout} seconds\n{prompt}", end='', flush=True)
+        if not sys.stdin.isatty():
+            return sys.stdin.readline().strip()
         ready, _, _ = select.select([sys.stdin], [], [], timeout)
         if ready:
             return sys.stdin.readline().strip()
@@ -542,18 +540,18 @@ class OpenRCTPluginDownloader:
     def match_installed_files_to_repo(self, installed_plugin, all_files):
         matched_files = []
         unmatched_files = []
-        
+
         for installed_file in installed_plugin.get('files', []):
             installed_path = installed_file.get('path', '')
             installed_clean = self.strip_version_strings(os.path.basename(installed_path))
             installed_release = installed_file.get('release', False)
-            
+
             matched = False
             for repo_file in all_files:
                 repo_path = repo_file.get('path', '')
                 repo_clean = self.strip_version_strings(os.path.basename(repo_path))
                 repo_release = repo_file.get('release', False)
-                
+
                 if installed_clean == repo_clean and installed_release == repo_release:
                     matched_files.append(repo_file)
                     matched = True
@@ -577,7 +575,7 @@ class OpenRCTPluginDownloader:
                 path_to_remove = clean_name
             else:
                 path_to_remove = os.path.basename(file_to_remove.get("path", ""))
-            
+
             try:
                 os.remove(path_to_remove)
             except:
@@ -589,7 +587,7 @@ class OpenRCTPluginDownloader:
         import re
         name_without_ext = os.path.splitext(filename)[0]
         ext = os.path.splitext(filename)[1]
-        
+
         version_patterns = [
             r'[-_]v?\d+\.\d+\.\d+',
             r'[-_]v?\d+\.\d+',
@@ -599,13 +597,13 @@ class OpenRCTPluginDownloader:
             r'[-_](alpha|beta|rc)\d*',
             r'[-_]min$',
         ]
-        
+
         for pattern in version_patterns:
             name_without_ext = re.sub(pattern, '', name_without_ext, flags=re.IGNORECASE)
-        
+
         name_without_ext = re.sub(r'[-_]+', '_', name_without_ext)
         name_without_ext = name_without_ext.strip('_-')
-        
+
         return name_without_ext + ext
 
     def download_files(self, selected_files):
@@ -615,14 +613,18 @@ class OpenRCTPluginDownloader:
                 file_url = file_info.get('url')
                 original_filename = os.path.basename(file_info.get('path', 'download.js'))
                 clean_filename = self.strip_version_strings(original_filename)
+
+                req = urllib.request.Request(file_url)
+                if 'api.github.com' in file_url and '/blobs/' in file_url:
+                    req.add_header('Accept', 'application/vnd.github.v3.raw')
                 
-                with urllib.request.urlopen(file_url) as response:
+                with urllib.request.urlopen(req) as response:
                     if response.status != 200:
                         raise Exception(f"Failed to download: {file_info.get('path')} (status {response.status})")
                     with open(clean_filename, 'wb') as file:
                         file.write(response.read())
                 downloaded_files.append({
-                    "path": file_info['path'], 
+                    "path": file_info['path'],
                     "release": file_info['release'],
                     "clean_name": clean_filename
                 })
@@ -652,7 +654,7 @@ class OpenRCTPluginDownloader:
 
     def github_download(self, plugin, skipcurrent=False):
         url_identifier = plugin.get('url_identifier', '')
-        
+
         if url_identifier:
             try:
                 detail_url = self.plugin_index.schema.plugin_request_url(url_identifier)
@@ -661,14 +663,14 @@ class OpenRCTPluginDownloader:
                     plugin['github_url'] = plugin_details['url']
             except Exception as e:
                 print(f"Could not fetch plugin details: {e}")
-        
+
         repo_api_url = self.generate_repo_api_url(plugin)
         repo_data = self.fetch_repository_details(repo_api_url)
-        
+
         if not repo_data:
             print("Failed to fetch repository details")
             return
-            
+
         last_update_time = repo_data.get('updated_at', '')
         state_select = None
 
@@ -733,10 +735,23 @@ class OpenRCTPluginDownloader:
         if selected_files:
             downloaded_plugin["files"] = self.download_files(selected_files)
         if downloaded_plugin.get("files"):
-            if state_select:
-                idx = self.get_plugin_index_by_name(plugin.get('name', ''))
-                if idx is not None:
-                    self.local_plugins[idx] = downloaded_plugin
+            idx = self.get_plugin_index_by_name(plugin.get('name', ''))
+            if idx is not None:
+                existing_files = self.local_plugins[idx].get('files', [])
+                existing_paths = set()
+                for f in existing_files:
+                    clean = f.get('clean_name', '')
+                    if clean:
+                        existing_paths.add(clean)
+                
+                for new_file in downloaded_plugin.get('files', []):
+                    clean = new_file.get('clean_name', '')
+                    if clean and clean not in existing_paths:
+                        existing_files.append(new_file)
+                
+                self.local_plugins[idx]['files'] = existing_files
+                self.local_plugins[idx]['download_time'] = int(time.time())
+                self.local_plugins[idx]['last_updated'] = downloaded_plugin.get('last_updated', 0)
             else:
                 self.local_plugins.append(downloaded_plugin)
         else:
