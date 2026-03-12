@@ -678,13 +678,11 @@ class OpenRCTPluginDownloader:
 
         state = self.what_about_plugin(plugin.get('name', ''))
         
-        if skipcurrent:
+        if state == "Outdated" and skipcurrent:
             auto_match = True
-            if state == "Outdated":
-                print(f"Auto-updating {plugin.get('name')} (online is newer)")
-            else:
-                print(f"Skipped {plugin.get('name')} because it was up to date")
-                return
+            print(f"Auto-updating {plugin.get('name')} (online is newer)")
+        elif state == "Outdated" and not skipcurrent:
+            print(f"Online version is newer, will update")
         elif state == "Current" or state == "Overdated":
             if not skipcurrent:
                 print("\nVersion is already up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup")
