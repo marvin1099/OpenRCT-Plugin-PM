@@ -478,7 +478,8 @@ class OpenRCTPluginDownloader:
             return None
         print(f"Timeout in {timeout} seconds\n{prompt}", end='', flush=True)
         if not sys.stdin.isatty():
-            return sys.stdin.readline().strip()
+            line = sys.stdin.readline()
+            return line.strip() if line else None
         ready, _, _ = select.select([sys.stdin], [], [], timeout)
         if ready:
             return sys.stdin.readline().strip()
@@ -673,11 +674,21 @@ class OpenRCTPluginDownloader:
 
         last_update_time = repo_data.get('updated_at', '')
         state_select = None
+        auto_match = False
 
         state = self.what_about_plugin(plugin.get('name', ''))
-        if state == "Current" or state == "Overdated":
+        
+        if skipcurrent:
+            auto_match = True
+            if state == "Outdated":
+                print(f"Auto-updating {plugin.get('name')} (online is newer)")
+            else:
+                print(f"Skipped {plugin.get('name')} because it was up to date")
+                return
+        elif state == "Current" or state == "Overdated":
             if not skipcurrent:
-                state_select = self.input_with_timeout("Version is already up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup\nYour choice: ", 20)
+                print("\nVersion is already up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup")
+                state_select = self.input_with_timeout("Your choice (default 0): ", 20)
             else:
                 print(f"Skipped {plugin.get('name')} because it was up to date")
             if not state_select or state_select == "0":
@@ -711,16 +722,33 @@ class OpenRCTPluginDownloader:
             print("")
 
         selected_files = []
-        if state_select:
-            iplugin = self.is_plugin_installed(plugin.get('name', ''))
-        if state_select == "1" and iplugin:
+        iplugin = self.is_plugin_installed(plugin.get('name', ''))
+        
+        if auto_match and iplugin:
+            selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin, all_files)
+            if unmatched:
+                print(f"Warning: {len(unmatched)} local file(s) not found online, keeping them")
+            print(f"Matched {len(selected_files)} files for update")
+        elif state_select == "1" and iplugin:
             selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin, all_files)
             if not all_matched:
-                stayon = self.input_with_timeout("Not all files were matched, if you continue the following files will be removed\n" + '\n '.join([str(u) for u in unmatched]) + "\n0. skip\n1. continue anyway\nYour choice: ", 20)
+                print("\nNot all files were matched, if you continue the following files will be removed\n\n" + '\n- '.join([str(u) for u in unmatched]) + "\n\n0. skip\n1. continue anyway\n")
+                stayon = self.input_with_timeout("Your choice (default 0): ", 20)
                 if not stayon or stayon == "0":
                     return
                 self.remove_pl_files(unmatched)
-        else:
+        elif state_select == "2":
+            selections = self.input_with_timeout("Enter the numbers of the files to download (comma-separated), or '0' to abort: ", 40)
+            print("")
+            if not selections:
+                selections = "1"
+            if selections and selections[0] != '0':
+                try:
+                    selected_indices = selections.split(',')
+                    selected_files = [all_files[int(index)-1] for index in selected_indices if 1 <= int(index) <= len(all_files)]
+                except (ValueError, IndexError):
+                    print("Invalid selection")
+        elif not iplugin:
             selections = self.input_with_timeout("Enter the numbers of the files to download (comma-separated), or '0' to abort: ", 40)
             print("")
             if not selections:
