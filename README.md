@@ -5,6 +5,8 @@ A simple OpenRCT2 plugin package manager and downloader written in Python.
 - **Codeberg**: https://codeberg.org/marvin1099/OpenRCT-Plugin-PM  
 - **GitHub**: https://github.com/marvin1099/OpenRCT-Plugin-PM  
 
+AI was used to help me make this.
+
 ## Description
 
 This script lets you search, install,  
