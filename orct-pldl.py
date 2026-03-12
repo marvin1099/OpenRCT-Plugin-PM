@@ -1,53 +1,249 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 import os
 import sys
 import time
 import json
 import select
 import argparse
-import requests
 import datetime
 import urllib.request
-from bs4 import BeautifulSoup
 import zipfile
 
+
+class PluginDatabaseSchema:
+    def __init__(self):
+        self.plugin_database_url = "https://openrct2plugins.org/"
+        self.plugin_sub_list = "list/"
+        self.plugin_sub_plugin = "plugin/"
+
+        self.start_par = "?"
+        self.merge_par = "&"
+
+        self.search_req = "search="
+        self.search_par = ""
+
+        self.sort_req = "sort="
+        self.sort_par = "updated"
+
+        self.page_req = "p="
+        self.page_par = 1
+
+        self.results_req = "results="
+        self.results_par = 100
+
+        self.json_par = "json"
+
+        self.plugin_id = ""
+
+    def _build_request_url(self) -> str:
+        query_parts = []
+
+        if self.sort_par:
+            query_parts.append(self.sort_req + str(self.sort_par))
+
+        if self.search_par:
+            query_parts.append(self.search_req + str(self.search_par))
+
+        if self.page_par:
+            query_parts.append(self.page_req + str(self.page_par))
+
+        if self.results_par:
+            query_parts.append(self.results_req + str(self.results_par))
+
+        if self.json_par:
+            query_parts.append(self.json_par)
+
+        full_query = str(self.start_par + self.merge_par.join(query_parts)) if query_parts else ""
+
+        return self.plugin_database_url + self.plugin_sub_list + full_query
+
+    def search_set_querys(self, search_par=None, sort_par=None, page_par=None, results_par=None) -> None:
+        search_par = search_par or self.search_par
+        sort_par = sort_par or self.sort_par
+        page_par = page_par or self.page_par
+        results_par = results_par or self.results_par
+
+        self.search_par = search_par
+        self.sort_par = sort_par
+        self.page_par = page_par
+        self.results_par = results_par
+
+    def search_with_querys(self, search_par=None, sort_par=None, page_par=None, results_par=None) -> str:
+        search_par = search_par or self.search_par
+        sort_par = sort_par or self.sort_par
+        page_par = page_par or self.page_par
+        results_par = results_par or self.results_par
+
+        self.search_set_querys(search_par, sort_par, page_par, results_par)
+        return self._build_request_url()
+
+    def page_query(self, page_par=None) -> str:
+        page_par = page_par or self.page_par
+        self.search_set_querys(page_par=page_par)
+        return self._build_request_url()
+
+    @property
+    def search_url(self) -> str:
+        return self._build_request_url()
+
+    def plugin_request_url(self, plugin_id=None) -> str:
+        plugin_id = plugin_id or self.plugin_id
+        return self.plugin_database_url + self.plugin_sub_plugin + str(plugin_id) + self.start_par + self.json_par
+
+    @property
+    def plugin_url(self) -> str:
+        return self.plugin_request_url()
+
+
+class RequestCachedURL:
+    def __init__(self, cache_file: str = "url_cache.json"):
+        self.cache_file = cache_file
+        self.cache: dict = {}
+        self.max_retries = 5
+        self.wait_between_retries = 10
+        self._load_cache()
+
+    def _load_cache(self) -> None:
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    self.cache = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                print("[WARNING] Cache file is corrupt or unreadable, starting fresh.")
+                self.cache = {}
+        else:
+            self.cache = {}
+
+    def _save_cache(self) -> None:
+        try:
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(self.cache, f, indent=2)
+        except OSError as e:
+            print(f"[ERROR] Failed to write cache file: {e}")
+
+    def _is_stale(self, key: str) -> bool:
+        entry = self.cache.get(key)
+        if not entry:
+            return True
+        pulled_last = entry.get("pulled_last", 0)
+        refresh_secs = entry.get("refresh_secs", 3600)
+        now = time.time()
+        return (now - pulled_last) > refresh_secs or (now - pulled_last) < 0
+
+    def get_json(self, url: str, refresh_secs: int = 3600) -> dict:
+        self._load_cache()
+        if self._is_stale(url):
+            for attempt in range(self.max_retries):
+                try:
+                    with urllib.request.urlopen(url) as response:
+                        if response.status != 200:
+                            raise Exception(f"Failed to fetch URL: {url} (status {response.status})")
+                        data = json.loads(response.read())
+                        self.cache[url] = {
+                            "pulled_last": int(time.time()),
+                            "refresh_secs": refresh_secs,
+                            "data": data,
+                        }
+                        self._save_cache()
+                        break
+                except Exception as e:
+                    print(f"[RETRY {attempt+1}/{self.max_retries}] Error fetching {url}: {e}")
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.wait_between_retries)
+                    else:
+                        raise
+        return self.cache[url]["data"]
+
+    def download_file(self, url: str, path: str) -> None:
+        for attempt in range(self.max_retries):
+            try:
+                print(f"[DOWNLOAD] {url} -> {path}")
+                with urllib.request.urlopen(url) as response, open(path, "wb") as out_file:
+                    if response.status != 200:
+                        raise Exception(f"Failed to download {url}: status {response.status}")
+                    out_file.write(response.read())
+                return
+            except Exception as e:
+                print(f"[RETRY {attempt+1}/{self.max_retries}] Error downloading {url}: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.wait_between_retries)
+                else:
+                    raise
+
+
+class PluginIndex:
+    def __init__(self, cache_file: str = "url_cache.json"):
+        self.schema = PluginDatabaseSchema()
+        self.urlcache = RequestCachedURL(cache_file)
+        self._plugin_list: dict = {}
+        self._result_list: dict = {}
+        self._result_requested: bool = False
+
+    def load_plugin_list(self) -> dict:
+        self._plugin_list = {}
+        first_page, pages = self._load_page(1)
+        self._plugin_list.update(first_page)
+
+        for p in range(2, pages + 1):
+            page_data, _ = self._load_page(p)
+            self._plugin_list.update(page_data)
+
+        self._result_requested = False
+        return self._plugin_list
+
+    def _load_page(self, page: int) -> tuple:
+        self.schema.page_par = page
+        page_url = self.schema.search_url
+        data = self.urlcache.get_json(page_url)
+        return data.get("data", {}), int(data.get("info", {}).get("pages", 1))
+
+    def filter_plugins(self, filter_key: str = None, filter_value: str = None, sort_key: str = None, reverse: bool = False, main_dict: dict = None) -> dict:
+        main_dict = main_dict or self.load_plugin_list()
+        return self.refilter_plugins(filter_key, filter_value, sort_key, reverse, main_dict)
+
+    def refilter_plugins(self, filter_key: str = None, filter_value: str = None, sort_key: str = None, reverse: bool = False, main_dict: dict = None) -> dict:
+        main_dict = main_dict or self._result_list if self._result_requested else self.load_plugin_list()
+
+        self._result_list = main_dict
+        self._result_requested = True
+
+        if filter_key and filter_value:
+            terms = filter_value.split()
+
+            def match(entry: dict) -> bool:
+                value = entry.get(filter_key)
+                if not value:
+                    return False
+
+                if filter_key == "tags":
+                    tag_list = [tag_obj.get("tag", "") for tag_obj in value]
+                    return all(term in tag_list for term in terms)
+
+                return all(term in str(value) for term in terms)
+
+            self._result_list = {p_id: info for p_id, info in self._result_list.items() if match(info)}
+
+        if sort_key:
+            self._result_list = dict(sorted(self._result_list.items(), key=lambda item: item[1].get(sort_key), reverse=reverse))
+
+        return self._result_list
+
+    def filterd_plugins(self):
+        return self._result_list if self._result_requested else self.load_plugin_list()
+
+    def get_plugin_meta(self, plugin_id: str) -> dict:
+        self.load_plugin_list()
+        return self._plugin_list.get(plugin_id, {})
+
+    def get_plugin_detail(self, plugin_id: str) -> dict:
+        self.load_plugin_list()
+        url = self.schema.plugin_request_url(plugin_id)
+        return self.urlcache.get_json(url)
+
+
 class OpenRCTPluginDownloader:
-    """
-    A class for downloading and managing OpenRCT2 plugins.
-
-    This class provides methods to download, install, update, and remove OpenRCT2 plugins
-    from the official plugin repository. It allows users to search for plugins, install them,
-    and manage their configurations.
-
-    Attributes:
-        storefile (str): The path to the configuration file storing plugin data.
-        baseurl (str): The base URL for the OpenRCT2 plugin repository.
-        pages (str): The URL suffix for pagination while fetching plugin data from the repository.
-        plugin (str): The type of resource, in this case, 'plugin'.
-        github (str): The base URL for GitHub repositories.
-        repo_api_base (str): The base URL for the GitHub API to fetch repository details.
-        scanurl (str): The URL suffix to scan repository files using GitHub API.
-        plugin_ignore_url (str): The URL to fetch the list of plugins to be ignored during installation.
-        plugin_ignore_list (list): A list of plugin names to be ignored during installation.
-        dignore (bool): A flag to indicate whether to ignore plugins mentioned in the ignore list.
-        online_plugins (list): A list to store information about plugins available in the online repository.
-        local_plugins (list): A list to store information about installed plugins.
-        last_config_sync (int): The timestamp when the configuration data was last synchronized.
-        last_update (int): The timestamp when the plugin data was last updated.
-        update_config_interval (int): The interval (in seconds) for syncing the configuration data.
-        update_plugins_interval (int): The interval (in seconds) for updating plugin data from the repository.
-    """
-    def __init__(self,config):
-        """
-        Initializes the OpenRCTPluginDownloader object.
-
-        Args:
-            config (str): The path to the configuration file.
-        """
+    def __init__(self, config):
         self.storefile = config
-        self.baseurl = 'https://openrct2plugins.org'
-        self.pages = '/list/?sort=new&p='
-        self.plugin = "plugin"
         self.github = "https://github.com"
         self.repo_api_base = "https://api.github.com/repos"
         self.scanurl = "git/trees/master?recursive=1"
@@ -61,11 +257,9 @@ class OpenRCTPluginDownloader:
         self.last_update = 0
         self.update_config_interval = 60*60
         self.update_plugins_interval = 60*60*24
+        self.plugin_index = PluginIndex()
 
     def load_data(self):
-        """
-        Loads plugin data from the configuration file.
-        """
         if os.path.isfile(self.storefile):
             with open(self.storefile, 'r') as file:
                 data = json.load(file)
@@ -79,9 +273,6 @@ class OpenRCTPluginDownloader:
                 self.update_plugins_interval = data.get("plugin_update_interval", 60*60*24)
 
     def save_data(self):
-        """
-        Saves plugin data to the configuration file.
-        """
         data = {
             "online_plugins": self.online_plugins,
             "local_plugins": self.local_plugins,
@@ -95,13 +286,7 @@ class OpenRCTPluginDownloader:
         with open(self.storefile, 'w') as file:
             json.dump(data, file, indent=4)
 
-    def update_plugins(self,skipcurrent=True):
-        """
-        Updates installed plugins to their latest versions.
-
-        Args:
-            skip_current (bool, optional): If True, skip plugins that are already up to date.
-        """
+    def update_plugins(self, skipcurrent=True):
         print("Updating plugins")
         for local_plugin in self.local_plugins:
             online_plugin = self.is_plugin_available(local_plugin['name'])
@@ -109,240 +294,97 @@ class OpenRCTPluginDownloader:
                 combined_info = {
                     "name": local_plugin['name'],
                     "download_time": int(time.time()),
-                    "last_updated": online_plugin['last_updated'],
+                    "last_updated": online_plugin.get('last_updated', 0),
                     "files": []
                 }
-                # Update local plugin information
                 index = self.get_plugin_index_by_name(local_plugin['name'])
                 self.local_plugins[index] = combined_info
-                self.github_download(online_plugin,skipcurrent)
+                self.github_download(online_plugin, skipcurrent)
                 print("")
             else:
                 print(f"Plugin '{local_plugin['name']}' not found online.")
             self.last_update = int(time.time())
 
-
-    def get_last_page_number(self, soup):
-        """
-        Get the last page number of the plugin repository pagination.
-
-        Parses the BeautifulSoup object representing the repository page and extracts the last page number
-        from the pagination section.
-
-        Args:
-            soup (BeautifulSoup): The BeautifulSoup object representing the HTML page.
-
-        Returns:
-            int: The last page number of the repository pagination.
-        """
-        pagination = soup.find('ul', class_='pagination')
-        last_page = pagination.find_all('li')[-2].text.strip()  # The second-to-last li element contains the last page number
-        return int(last_page)
-
-    def extract_info(self, item, title):
-        """
-        Extract specific information from a plugin item.
-
-        Extracts the specified information (title) from the plugin item represented by the BeautifulSoup object.
-        Used during web scraping to extract details like plugin name, author, stars, etc.
-
-        Args:
-            item (BeautifulSoup): The BeautifulSoup object representing the plugin item.
-            title (str): The title of the information to be extracted.
-
-        Returns:
-            str: Extracted information or "N/A" if not found.
-        """
-        tag = item.find('span', title=lambda t: t and t.startswith(title))
-        if tag:
-            return tag.text.replace(title, '').strip()
-        return "N/A"
-
-    def convert_to_seconds(self, time_str):
-        """
-        Convert a time duration string to seconds.
-
-        Parses a time duration string in the format 'X unit(s)' and converts it to seconds.
-        Supports units: 'm', 'min', 'h', 'd', 'mo', 'y' (minutes, hours, days, months, years).
-
-        Args:
-            time_str (str): The time duration string to convert.
-
-        Returns:
-            str: The duration in seconds as a string.
-        """
-        time_dict = {"m": 60, "min": 60, "h": 60 * 60, "d": 24 * 60 * 60, "mo": 30.44 * 24 * 60 * 60, "y": 365.25 * 24 * 60 * 60}
-        num, unit = time_str.split()
-        num = int(num)
-        seconds = num * time_dict.get(unit, 1)  # Default to 1 second for unknown units
-        return str(int(seconds))
-
-    def generate_github_url(self, plugin_item):
-        """
-        Generate the GitHub URL for a plugin item.
-
-        Generates the GitHub URL for a given plugin item using its author and name attributes.
-
-        Args:
-            plugin_item (dict): The dictionary containing plugin information.
-
-        Returns:
-            str: The GitHub URL for the plugin item.
-        """
-        return f"{self.github}/{plugin_item['author']}/{plugin_item['name']}"
-
     def generate_repo_api_url(self, plugin):
-        """
-        Generate the GitHub repository API URL for a plugin.
-
-        Generates the GitHub repository API URL for a given plugin using its author and name attributes.
-
-        Args:
-            plugin (dict): The dictionary containing plugin information.
-
-        Returns:
-            str: The GitHub repository API URL for the plugin.
-        """
-        return f"{self.repo_api_base}/{plugin['author']}/{plugin['name']}"
-
-    def generate_plugin_url(self, plugin_item):
-        """
-        Generate the plugin's URL on the plugin repository website.
-
-        Generates the URL for a given plugin item on the OpenRCT2 plugin repository website.
-
-        Args:
-            plugin_item (dict): The dictionary containing plugin information.
-
-        Returns:
-            str: The plugin's URL on the repository website.
-        """
-        return f"{self.baseurl}/{self.plugin}/{plugin_item['url_identifier']}"
+        author = plugin.get('author', '')
+        name = plugin.get('name', '')
+        
+        if 'github_url' in plugin:
+            gh_url = plugin['github_url']
+            if gh_url and 'github.com' in gh_url:
+                parts = gh_url.replace('https://github.com/', '').split('/')
+                if len(parts) >= 2:
+                    return f"{self.repo_api_base}/{parts[0]}/{parts[1]}"
+        
+        return f"{self.repo_api_base}/{author}/{name}"
 
     def load_ignore_list(self):
-        """
-        Load the plugin ignore list from the specified URL and update the local ignore list.
-
-        Attempts to load the plugin ignore list from the configured URL. If successful, updates the local
-        plugin_ignore_list attribute. If an error occurs during loading, the function proceeds without
-        updating the local ignore list and returns the current ignore list.
-
-        Returns:
-            list: The updated plugin ignore list, or the current ignore list if no update was made.
-        """
         try:
             with urllib.request.urlopen(self.plugin_ignore_url) as response:
                 ignore_list_data = json.loads(response.read())
-                # Merge the data from ignore_list_data with self.plugin_ignore_list, ignoring duplicates
                 updated_ignore_list = list(set(self.plugin_ignore_list + ignore_list_data))
                 self.plugin_ignore_list = updated_ignore_list
                 return updated_ignore_list
         except Exception as e:
-            # Handle any loading errors and return the current ignore list
             print(f"Error loading plugin ignore list: {e}")
             return self.plugin_ignore_list
 
     def update_index(self):
-        """
-        Update the plugin repository index.
-
-        Fetches the plugin information from the OpenRCT2 plugin repository, including plugin names, authors, descriptions,
-        stars, submission time, last update time, licenses, URL identifiers, and tags. Updates the online_plugins attribute.
-
-        Returns:
-            None
-        """
-        #return # REMOVE LATER STOPS REQESTS WHEN TESTING
-        page = 1
         print("Updating index")
-        print("Getting Page " + str(page))
-        response = urllib.request.urlopen(self.baseurl + self.pages + str(page))
-        soup = BeautifulSoup(response, 'html.parser')
-        last_page = self.get_last_page_number(soup)
-
-
         plugin_list = []
+        try:
+            plugins_dict = self.plugin_index.load_plugin_list()
+            for plugin_id, plugin_data in plugins_dict.items():
+                tags_list = []
+                if 'tags' in plugin_data and plugin_data['tags']:
+                    for tag_obj in plugin_data['tags']:
+                        if isinstance(tag_obj, dict):
+                            tags_list.append(tag_obj.get('tag', ''))
+                        else:
+                            tags_list.append(str(tag_obj))
 
-        # Loop through all pages
-        for page in range(1, last_page + 1):
-            #if page > 2: # DELETE LATER, STOPS LOTS OF REQESTS
-            #    break
-            if page > 1:
-                print("Getting Page " + str(page))
-                response = urllib.request.urlopen(self.baseurl + self.pages + str(page))
-                soup = BeautifulSoup(response, 'html.parser')
-            # Extract information for each plugin item on the page
-            plugin_items = soup.find_all('div', class_='row list-item')
-            for item in plugin_items:
-                plugin_info = {}
-                plugin_info['name'] = item.find('h4').text.strip()
-                plugin_info['description'] = item.find('p', class_='description').text.strip()
-                plugin_info['author'] = item.find('span').find('a').text.strip()
-                plugin_info['stars'] = int(item.find('span', title='Stars on GitHub').text.strip())
-                plugin_info['submitted'] = int(time.time()) - int(self.convert_to_seconds(self.extract_info(item, 'Submitted:')))
-                plugin_info['last_updated'] = int(time.time()) - int(self.convert_to_seconds(self.extract_info(item, 'Last updated:')))
-                license_span = item.find('span', title='License')
-                plugin_info['license'] = license_span.text.strip() if license_span else "N/A"
-                plugin_info['url_identifier'] = item.find('a')['href'].split('/')[-2]
-                plugin_info['tags'] = [tag.text.strip() for tag in item.find_all('li')]
+                plugin_info = {
+                    'name': plugin_data.get('name', ''),
+                    'description': plugin_data.get('description', ''),
+                    'author': plugin_data.get('owner', ''),
+                    'stars': plugin_data.get('stargazers', 0),
+                    'submitted': plugin_data.get('submittedAt', 0),
+                    'last_updated': plugin_data.get('updatedAt', 0),
+                    'license': plugin_data.get('licenseName', 'N/A'),
+                    'url_identifier': plugin_id,
+                    'tags': tags_list
+                }
                 plugin_list.append(plugin_info)
-            if page >= last_page:
-                print("Finished all " + str(page) + " pages")
+            print(f"Loaded {len(plugin_list)} plugins from API")
+        except Exception as e:
+            print(f"Error updating index: {e}")
+            plugin_list = []
 
         self.online_plugins = plugin_list
         self.last_config_sync = int(time.time())
 
-    def print_results(self,results):
-        """
-        Prints the details of plugins from the search results.
-
-        Args:
-            results (list): List of dictionaries containing plugin information.
-                Each dictionary should have the following keys:
-                - 'name': Plugin name
-                - 'description': Plugin description
-                - 'author': Plugin author
-                - 'stars': Number of stars received by the plugin
-                - 'submitted': Date of plugin submission
-                - 'last_updated': Date of last update to the plugin
-                - 'license': Plugin license information
-                - 'url_identifier': Unique identifier for the plugin's URL
-                - 'tags' (optional): List of tags associated with the plugin
-        """
+    def print_results(self, results):
         print("-" * 50)
         for plugin in reversed(results):
-            print(f"Name: {plugin['name']}")
-            print(f"Description: {plugin['description']}")
-            print(f"Author: {plugin['author']}")
-            print(f"Stars: {plugin['stars']}")
-            print(f"Submitted: {plugin['submitted']}")
-            print(f"Last Updated: {plugin['last_updated']}")
-            print(f"License: {plugin['license']}")
-            print(f"URL Identifier: {plugin['url_identifier']}")
-            if plugin['name'] in self.plugin_ignore_list:
+            print(f"Name: {plugin.get('name', 'N/A')}")
+            print(f"Description: {plugin.get('description', 'N/A')}")
+            print(f"Author: {plugin.get('author', 'N/A')}")
+            print(f"Stars: {plugin.get('stars', 0)}")
+            print(f"Submitted: {plugin.get('submitted', 0)}")
+            print(f"Last Updated: {plugin.get('last_updated', 0)}")
+            print(f"License: {plugin.get('license', 'N/A')}")
+            print(f"URL Identifier: {plugin.get('url_identifier', 'N/A')}")
+            if plugin.get('name') in self.plugin_ignore_list:
                 print("In Ignore List: True")
-            if plugin['tags']:
+            if plugin.get('tags'):
                 print(f"Tags: {', '.join(plugin['tags'])}")
             print("-" * 50)
 
     def sort_plugins_by_key(self, search_results, keys=[None]):
-        """
-        Sorts the search results based on the specified sorting key.
-
-        Sorts the given search results based on the specified sorting key.
-        Supported keys: None, 'n' for name, 's' for stars, 'm' for submitted, 'l' for last_updated, 'r' to reverse the results.
-
-        Args:
-            search_results (list): List of dictionaries representing matching plugins.
-            sort_key (str, optional): The key to sort the results. Default is None.
-
-        Returns:
-            list: A list of dictionaries representing sorted plugins.
-        """
-        rev=False
-        sort_key=False
+        rev = False
+        sort_key = False
         for found_key in keys:
-            if found_key in ['n', 's', 'm', 'l',None]:
+            if found_key in ['n', 's', 'm', 'l', None]:
                 sort_key = found_key
             if found_key == "r":
                 rev = True
@@ -354,44 +396,19 @@ class OpenRCTPluginDownloader:
 
         sorted_results = []
         if sort_key == 'n':
-            sorted_results = sorted(search_results, key=lambda x: x['name'], reverse=rev)
+            sorted_results = sorted(search_results, key=lambda x: x.get('name', ''), reverse=rev)
         elif sort_key == 's':
-            sorted_results = sorted(search_results, key=lambda x: x['stars'], reverse=not rev)
+            sorted_results = sorted(search_results, key=lambda x: x.get('stars', 0), reverse=not rev)
         elif sort_key == 'm':
-            sorted_results = sorted(search_results, key=lambda x: x['submitted'], reverse=rev)
+            sorted_results = sorted(search_results, key=lambda x: x.get('submitted', 0), reverse=rev)
         elif sort_key == 'l':
-            sorted_results = sorted(search_results, key=lambda x: x['last_updated'], reverse=rev)
+            sorted_results = sorted(search_results, key=lambda x: x.get('last_updated', 0), reverse=rev)
 
         return sorted_results
 
     def search_plugins(self, query, fields=None, number=0):
-        """
-        Search for plugins based on the specified query and fields.
-
-        Searches for plugins in the online repository based on the given query and optional search fields.
-        Supported fields: 'n' (name), 'd' (description), 'a' (author), 's' (stars),
-        'g' (greater (can be used with s,m,u) number needs to be specified), 'x' to disable UnixTime - number (then its just number),
-        'b' (below (can be used with s,m,u) number needs to be specified), 'm' (submission time), 'u' (last_update),
-        'l' (license), 'i' (URL identifier), 't' (tags), 'p' (partial tag search), r (query and number have to be true).
-
-        Returns a list of matching plugins.
-
-        Args:
-            query (str): The search query.
-            fields (list, optional): List of search fields. Default is ['n'] (name).
-
-        Returns:
-            list: A list of dictionaries representing matching plugins.
-
-        Example:
-            To search for plugins with a name containing 'coaster' and more than 20 stars:
-            >>> search_results = search_plugins('coaster',['n', 's', 'r', 'g'], '20')
-
-            To search for plugins submitted within the last 30 days (in seconds so 30*24*60*60 = 2592000):
-            >>> search_results = search_plugins('',['m', 'g'],'2592000')
-        """
         if not fields:
-            fields = ["n"]  # Default to searching in plugin names if fields are not provided
+            fields = ["n"]
         if number == None:
             number = 0
         if "x" not in fields:
@@ -420,54 +437,47 @@ class OpenRCTPluginDownloader:
                         (field == "m" and int(unumber) > plugin.get("submitted", 0)) or \
                         (field == "u" and int(unumber) > plugin.get("last_updated", 0)):
                         intmatch = True
-                if field == "n" and query.lower() in plugin['name'].lower():
+
+                plugin_name = plugin.get('name', '') or ''
+                plugin_desc = plugin.get('description', '') or ''
+                plugin_author = plugin.get('author', '') or ''
+                plugin_license = plugin.get('license', '') or ''
+                plugin_url_id = plugin.get('url_identifier', '') or ''
+                plugin_tags = plugin.get('tags', []) or []
+
+                if field == "n" and query.lower() in plugin_name.lower():
                     matched = True
-                elif field == "d" and query.lower() in plugin['description'].lower():
+                elif field == "d" and plugin_desc and query.lower() in plugin_desc.lower():
                     matched = True
-                elif field == "a" and query.lower() in plugin['author'].lower():
+                elif field == "a" and plugin_author and query.lower() in plugin_author.lower():
                     matched = True
-                elif field == "s" and str(number).isdigit() and int(number) == plugin['stars']:
+                elif field == "s" and str(number).isdigit() and int(number) == plugin.get("stars", 0):
                     intmatch = True
-                elif field == "m" and str(number).isdigit() and int(number) == plugin['submitted']:
+                elif field == "m" and str(number).isdigit() and int(number) == plugin.get("submitted", 0):
                     intmatch = True
-                elif field == "u" and str(number).isdigit() and int(number) == plugin["last_updated"]:
+                elif field == "u" and str(number).isdigit() and int(number) == plugin.get("last_updated", 0):
                     intmatch = True
-                #elif filed = "o" and query.lower() in str(plugin["download_time"]) #think about adding in but wolud need to be read from self.local_plugins
-                #    matched = True
-                elif field == "l" and query.lower() in plugin['license'].lower():
+                elif field == "l" and query.lower() in plugin_license.lower():
                     matched = True
-                elif field == "i" and query.lower() in plugin['url_identifier'].lower():
+                elif field == "i" and query.lower() in plugin_url_id.lower():
                     matched = True
-                elif field == "t" and any(tag.lower() == query.lower() for tag in plugin['tags']):
+                elif field == "t" and any(tag.lower() == query.lower() for tag in plugin_tags):
                     if "p" in fields:
-                        if any(query.lower() in tag.lower() for tag in plugin['tags']):
+                        if any(query.lower() in tag.lower() for tag in plugin_tags):
                             matched = True
                     else:
-                        if any(tag.lower() == query.lower() for tag in plugin['tags']):
+                        if any(tag.lower() == query.lower() for tag in plugin_tags):
                             matched = True
 
                 if matched and intmatch and strict:
                     search_results.append(plugin)
-                    break  # Break the inner loop if a match is found in any specified field
+                    break
                 elif (matched or intmatch) and not strict:
                     search_results.append(plugin)
-                    break  # Break the inner loop if a match is found in any specified field
+                    break
         return search_results
 
     def input_with_timeout(self, prompt, timeout=5):
-        """
-        Get user input with a timeout.
-
-        Displays the given prompt and waits for user input. If no input is received within the specified timeout,
-        returns None. Otherwise, returns the user input.
-
-        Args:
-            prompt (str): The input prompt.
-            timeout (int, optional): The timeout duration in seconds. Default is 5 seconds.
-
-        Returns:
-            str or None: User input or None if no input is received within the timeout.
-        """
         if self.instant_timeout:
             return None
         print(f"Timeout in {timeout} seconds\n{prompt}", end='', flush=True)
@@ -478,32 +488,12 @@ class OpenRCTPluginDownloader:
             return None
 
     def scan_repository_for_files(self, repo_api_url, file_extension):
-        """
-        Scan the repository for files with the specified file extension.
-
-        Args:
-            repo_api_url (str): The URL to the repository API.
-            file_extension (str): The file extension to search for (e.g., '.js').
-
-        Returns:
-            list: A list of dictionaries, where each dictionary represents a file
-            found in the repository. Each dictionary contains 'path', 'url', and
-            'release' keys indicating the file path, download URL, and release status
-            respectively.
-
-        Note:
-            This function uses the GitHub API to fetch the repository tree and scans
-            for files with the specified extension. It returns a list of dictionaries,
-            each representing a file found in the repository.
-        """
         files = []
         try:
-            # Fetch the repository tree using the GitHub API v3
             tree_url = f"{repo_api_url}/{self.scanurl}"
-            response = requests.get(tree_url, headers={"Accept": "application/vnd.github.v3+json"})
-            tree_data = response.json()
+            with urllib.request.urlopen(tree_url) as response:
+                tree_data = json.loads(response.read())
 
-            # Scan files in the repository tree
             if 'tree' in tree_data:
                 for item in tree_data['tree']:
                     if item['type'] == 'blob' and item['path'].endswith(file_extension):
@@ -518,27 +508,9 @@ class OpenRCTPluginDownloader:
         return files
 
     def sort_by_subfolder_depth(self, file_info):
-        """
-        Helper function to sort files based on their subfolder depth.
-
-        Args:
-            file_info (dict): Information about the file including its path.
-
-        Returns:
-            int: The depth of the subfolder containing the file.
-        """
         return file_info['path'].count('/')
 
     def what_about_plugin(self, plugin_name):
-        """
-        Determine the status of a plugin (e.g., Current, Overdated, Uninstalled) based on its local and online data.
-
-        Args:
-            plugin_name (str): The name of the plugin.
-
-        Returns:
-            str: The status of the plugin (Outdated, Current, Overdated, Uninstalled, Missing, Offline).
-        """
         local_plugin = next((p for p in self.local_plugins if p['name'] == plugin_name), None)
         online_plugin = next((p for p in self.online_plugins if p['name'] == plugin_name), None)
 
@@ -552,9 +524,7 @@ class OpenRCTPluginDownloader:
             return "Offline"
 
         local_last_updated = local_plugin['last_updated']
-        #local_download_time = local_plugin['download_time']
-        online_last_updated = online_plugin['last_updated']
-        #online_submitted = online_plugin['submitted']
+        online_last_updated = online_plugin.get('last_updated', 0)
 
         if local_last_updated > online_last_updated:
             return "Overdated"
@@ -564,37 +534,18 @@ class OpenRCTPluginDownloader:
             return "Outdated"
 
     def is_plugin_installed(self, plugin_name):
-        """
-        Check if a plugin is currently installed locally.
-
-        Args:
-            plugin_name (str): The name of the plugin.
-
-        Returns:
-            dict or None: The plugin information if installed, or None if not installed.
-        """
         for plugin in self.local_plugins:
             if plugin['name'] == plugin_name:
                 return plugin
         return None
 
     def match_installed_files_to_repo(self, installed_plugin, all_files):
-        """
-        Match files of an installed plugin to files available in the repository.
-
-        Args:
-            installed_plugin (dict): Information about the installed plugin.
-            all_files (list): List of all files available in the repository.
-
-        Returns:
-            list, bool, list: List of matched files, boolean indicating if all files are matched, and list of unmatched files.
-        """
         matched_files = []
         unmatched_files = []
-        for installed_file in installed_plugin['files']:
+        for installed_file in installed_plugin.get('files', []):
             matched = False
             for repo_file in all_files:
-                if repo_file['path'] == installed_file['path'] and repo_file['release'] == installed_file['release']:
+                if repo_file['path'] == installed_file.get('path') and repo_file['release'] == installed_file.get('release'):
                     matched_files.append(repo_file)
                     matched = True
                     break
@@ -605,31 +556,12 @@ class OpenRCTPluginDownloader:
         return matched_files, all_files_matched, unmatched_files
 
     def get_plugin_index_by_name(self, plugin_name):
-        """
-        Get the index of a plugin in the local plugins list based on its name.
-
-        Args:
-            plugin_name (str): The name of the plugin.
-
-        Returns:
-            int or None: The index of the plugin in the local plugins list, or None if not found.
-        """
         for index, plugin in enumerate(self.local_plugins):
             if plugin['name'] == plugin_name:
                 return index
         return None
 
     def remove_pl_files(self, files_to_remove):
-        """
-        Remove specified files from the local directory.
-
-        Args:
-            files_to_remove (list of dict): List of dictionaries containing file information.
-                Each dictionary must have a 'path' key indicating the file path to be removed.
-
-        Returns:
-            None
-        """
         for file_to_remove in files_to_remove:
             path_to_remove = os.path.basename(file_to_remove.get("path"))
             try:
@@ -640,198 +572,147 @@ class OpenRCTPluginDownloader:
                 print(f"Removed file: {path_to_remove}")
 
     def download_files(self, selected_files):
-        """
-        Download selected files from their URLs and save them locally.
-
-        Args:
-            selected_files (list): List of dictionaries containing file information including URLs.
-
-        Returns:
-            list: List of dictionaries containing information about the downloaded files.
-        """
         downloaded_files = []
         for file_info in selected_files:
             try:
-                response = requests.get(file_info['url'], stream=True)
-                response.raise_for_status()
-                file_name = os.path.basename(file_info['path'])
-                with open(file_name, 'wb') as file:
-                    for chunk in response.iter_content(1024):
-                        file.write(chunk)
+                file_url = file_info.get('url')
+                file_name = os.path.basename(file_info.get('path', 'download.js'))
+                with urllib.request.urlopen(file_url) as response:
+                    if response.status != 200:
+                        raise Exception(f"Failed to download: {file_info.get('path')} (status {response.status})")
+                    with open(file_name, 'wb') as file:
+                        file.write(response.read())
                 downloaded_files.append({"path": file_info['path'], "release": file_info['release']})
                 print(f"Downloaded: {file_name}")
-            except requests.exceptions.RequestException as e:
-                print(f"Failed to download: {file_info['path']} - {e}")
+            except Exception as e:
+                print(f"Failed to download: {file_info.get('path')} - {e}")
         return downloaded_files
 
     def fetch_repository_details(self, repo_api_url):
-        """
-        Fetch detailed information about a GitHub repository using its API URL.
-
-        Args:
-            repo_api_url (str): The GitHub API URL of the repository.
-
-        Returns:
-            dict or None: Dictionary containing repository details, or None if fetching fails.
-        """
         try:
-            response = requests.get(repo_api_url)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as errh:
-            print(f"HTTP Error: {errh}")
-        except requests.exceptions.ConnectionError as errc:
-            print(f"Error Connecting: {errc}")
-        except requests.exceptions.Timeout as errt:
-            print(f"Timeout Error: {errt}")
-        except requests.exceptions.RequestException as err:
-            print(f"Error: {err}")
-        return None
+            with urllib.request.urlopen(repo_api_url) as response:
+                return json.loads(response.read())
+        except Exception as e:
+            print(f"Error fetching repository details: {e}")
+            return None
 
     def fetch_release_files(self, releases_url):
-        """
-        Fetch and return files available in a GitHub release.
-
-        Args:
-            releases_url (str): The GitHub API URL for the releases of a repository.
-
-        Returns:
-            list: List of dictionaries containing information about files available in the release.
-        """
         try:
-            release_data = requests.get(releases_url).json()
-            assets = release_data[0].get('assets', [])
-            return [{'path': asset['name'], 'url': asset['browser_download_url'], 'release': True} for asset in assets if asset['name'].endswith('.js')]
-        except requests.exceptions.RequestException as e:
+            with urllib.request.urlopen(releases_url) as response:
+                release_data = json.loads(response.read())
+                if isinstance(release_data, list) and len(release_data) > 0:
+                    assets = release_data[0].get('assets', [])
+                    return [{'path': asset['name'], 'url': asset['browser_download_url'], 'release': True} for asset in assets if asset['name'].endswith('.js')]
+        except Exception as e:
             print(f"Error fetching release files: {e}")
-            return []
+        return []
 
-    def github_download(self,plugin,skipcurrent=False):
-        """
-        Download and install the specified plugin from GitHub.
-
-        Args:
-            plugin (dict): A dictionary containing plugin information including 'name',
-                'author', etc.
-            skipcurrent (bool, optional): Whether to skip downloading if the plugin is
-                already up-to-date. Defaults to False.
-
-        Note:
-            This function downloads the plugin files, allows the user to select files
-            for download, and updates the local plugin list with the downloaded files.
-            It provides options to skip installation, reinstall the current file setup,
-            or install with a different file setup.
-        """
-        #plugin_url = self.generate_github_url(plugin)
+    def github_download(self, plugin, skipcurrent=False):
+        url_identifier = plugin.get('url_identifier', '')
+        
+        if url_identifier:
+            try:
+                detail_url = self.plugin_index.schema.plugin_request_url(url_identifier)
+                plugin_details = self.plugin_index.urlcache.get_json(detail_url)
+                if plugin_details and 'url' in plugin_details:
+                    plugin['github_url'] = plugin_details['url']
+            except Exception as e:
+                print(f"Could not fetch plugin details: {e}")
+        
         repo_api_url = self.generate_repo_api_url(plugin)
         repo_data = self.fetch_repository_details(repo_api_url)
-        last_update_time = repo_data['updated_at']
+        
+        if not repo_data:
+            print("Failed to fetch repository details")
+            return
+            
+        last_update_time = repo_data.get('updated_at', '')
         state_select = None
 
-        state = self.what_about_plugin(plugin['name'])
+        state = self.what_about_plugin(plugin.get('name', ''))
         if state == "Current" or state == "Overdated":
             if not skipcurrent:
-                state_select = self.input_with_timeout("Version is allready up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup\nYour choice: ", 20)
+                state_select = self.input_with_timeout("Version is already up to date\n0. To skip install\n1. To reinstall the current file setup\n2. To reinstall with a other file setup\nYour choice: ", 20)
             else:
-                print(f"Skiped {plugin['name']} becalse it was up to date")
+                print(f"Skipped {plugin.get('name')} because it was up to date")
             if not state_select or state_select == "0":
                 return
             if state_select != "1":
                 state_select = "2"
 
         downloaded_plugin = {
-            "name": plugin['name'],
-            "download_time": int(time.time()),  # Current Unix timestamp when the plugin is downloaded
-            "last_updated": int(datetime.datetime.strptime(last_update_time, "%Y-%m-%dT%H:%M:%SZ").timestamp()),    # Use the last_update_time variable from your code
+            "name": plugin.get('name', ''),
+            "download_time": int(time.time()),
+            "last_updated": int(datetime.datetime.strptime(last_update_time, "%Y-%m-%dT%H:%M:%SZ").timestamp()) if last_update_time else int(time.time()),
             "files": []
         }
 
         print("")
-        # Scan files in the latest release
         if 'releases_url' in repo_data:
             release_files = self.fetch_release_files(repo_data['releases_url'].replace('{/id}', ''))
         else:
             release_files = []
 
-        # Scan files in the repository
         files = self.scan_repository_for_files(repo_api_url, '.js')
         sorted_files = sorted(files, key=self.sort_by_subfolder_depth)
 
-        all_files=release_files+sorted_files
-        # Print result amount
+        all_files = release_files + sorted_files
         if state_select != "1":
             print(f"Found {len(release_files)} .js files in the latest release.")
             print(f"Found {len(files)} .js files in the repository.")
             print("")
             for index, file_info in enumerate(all_files, start=1):
                 print(f"{index}. Path: {file_info['path']}, Release: {file_info['release']}")
-                #URL: {file_info['url']}
             print("")
 
+        selected_files = []
         if state_select:
-            iplugin = self.is_plugin_installed(plugin['name'])
-        if state_select == "1":
-            selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin,all_files)
+            iplugin = self.is_plugin_installed(plugin.get('name', ''))
+        if state_select == "1" and iplugin:
+            selected_files, all_matched, unmatched = self.match_installed_files_to_repo(iplugin, all_files)
             if not all_matched:
-                stayon = self.input_with_timeout("Not all files where matched, if you continue the following files will be removed\n" + '\n '.join(unmatched) + "\n0. skip\n1. continue anyway\nYour choice: ", 20)
+                stayon = self.input_with_timeout("Not all files were matched, if you continue the following files will be removed\n" + '\n '.join([str(u) for u in unmatched]) + "\n0. skip\n1. continue anyway\nYour choice: ", 20)
                 if not stayon or stayon == "0":
                     return
                 self.remove_pl_files(unmatched)
         else:
-            # Let the user select multiple files
             selections = self.input_with_timeout("Enter the numbers of the files to download (comma-separated), or '0' to abort: ", 40)
             print("")
             if not selections:
-                selections = "1" # default selection is 1
+                selections = "1"
             if selections and selections[0] != '0':
-                selected_indices = selections.split(',')
-                selected_files = [all_files[int(index)-1] for index in selected_indices if 1 <= int(index) <= len(sorted_files)]
+                try:
+                    selected_indices = selections.split(',')
+                    selected_files = [all_files[int(index)-1] for index in selected_indices if 1 <= int(index) <= len(all_files)]
+                except (ValueError, IndexError):
+                    print("Invalid selection")
 
         if selected_files:
             downloaded_plugin["files"] = self.download_files(selected_files)
-        if downloaded_plugin["files"]:
+        if downloaded_plugin.get("files"):
             if state_select:
-                self.local_plugins[self.get_plugin_index_by_name(plugin['name'])] = downloaded_plugin
+                idx = self.get_plugin_index_by_name(plugin.get('name', ''))
+                if idx is not None:
+                    self.local_plugins[idx] = downloaded_plugin
             else:
                 self.local_plugins.append(downloaded_plugin)
         else:
-            if state_select:
-                self.remove_pl_files(iplugin["files"])
-                self.local_plugins.pop(self.get_plugin_index_by_name(plugin['name']))
+            if state_select and iplugin:
+                self.remove_pl_files(iplugin.get("files", []))
+                idx = self.get_plugin_index_by_name(plugin.get('name', ''))
+                if idx is not None:
+                    self.local_plugins.pop(idx)
             print(f"No Files selected, Skipping install")
 
     def is_plugin_available(self, plugin_name):
-        """
-        Check if the specified plugin is available in the online plugin repository.
-
-        Args:
-            plugin_name (str): The name of the plugin to check for availability.
-
-        Returns:
-            dict or None: A dictionary containing plugin information if the plugin is
-            available online, or None if the plugin is not found.
-        """
         for plugin in self.online_plugins:
-            if plugin['name'] == plugin_name:
+            if plugin.get('name') == plugin_name:
                 return plugin
         return None
 
     def install_plugin(self, plugin_name):
-        """
-        Install the specified plugin.
-
-        Args:
-            plugin_name (str): The name of the plugin to install.
-
-        Note:
-            This function checks if the plugin is in the ignore list, searches for
-            similar plugins if needed, allows the user to select a plugin, and installs
-            the selected plugin. It provides options to skip installation or abort the
-            installation process.
-        """
         try:
-            # Check if the plugin is already in the ignore list and if it is not found perfectly, then search for it
-            if plugin_name in self.plugin_ignore_list and not self.dignore: # Only skip if the ignore list is enabled
+            if plugin_name in self.plugin_ignore_list and not self.dignore:
                 print(f"Plugin '{plugin_name}' is in the ignore list. looking for close matches")
                 found_plugin = False
             else:
@@ -843,7 +724,7 @@ class OpenRCTPluginDownloader:
 
                 if not self.dignore:
                     print("Checking for plugin results from ignore list and removing them")
-                    search_results = [result for result in search_results if result['name'] not in self.plugin_ignore_list]
+                    search_results = [result for result in search_results if result.get('name') not in self.plugin_ignore_list]
 
                 if not search_results:
                     print(f"No similar plugins found for '{plugin_name}'. Installation aborted.")
@@ -851,11 +732,10 @@ class OpenRCTPluginDownloader:
 
                 print(f"Similar plugins found:")
                 for idx, result in enumerate(search_results, start=1):
-                    print(f"{idx}. {result['name']}")
+                    print(f"{idx}. {result.get('name', 'N/A')}")
                 print("")
 
-                # Let the user select a plugin to install
-                selection = self.input_with_timeout("Enter the number of the plugin to install, or '0' to abort: ",20)
+                selection = self.input_with_timeout("Enter the number of the plugin to install, or '0' to abort: ", 20)
                 print("")
                 if selection == None or selection == '0' or selection == '':
                     print("Installation aborted.")
@@ -864,7 +744,7 @@ class OpenRCTPluginDownloader:
                 try:
                     selected_index = int(selection) - 1
                     selected_plugin = search_results[selected_index]
-                    print(f"Installing plugin: {selected_plugin['name']}")
+                    print(f"Installing plugin: {selected_plugin.get('name', '')}")
                     self.github_download(selected_plugin)
                     print("")
                 except (ValueError, IndexError):
@@ -877,77 +757,47 @@ class OpenRCTPluginDownloader:
             print(f"Error installing plugin: {e}")
 
     def remove_plugin(self, plugin_name):
-        """
-        Remove the specified plugin from the local installation.
-
-        Args:
-            plugin_name (str): The name of the plugin to remove.
-
-        Note:
-            This function removes the specified plugin's files from the local directory
-            and updates the local plugin list.
-        """
         state = self.what_about_plugin(plugin_name)
         if state == "Missing" or state == "Uninstalled":
-            print("Plugin not installed, Skipping removeal")
+            print("Plugin not installed, Skipping removal")
             return
         idxplugin = self.get_plugin_index_by_name(plugin_name)
-        self.remove_pl_files(self.local_plugins[idxplugin]['files'])
-        self.local_plugins.pop(idxplugin)
-        pass
+        if idxplugin is not None:
+            self.remove_pl_files(self.local_plugins[idxplugin].get('files', []))
+            self.local_plugins.pop(idxplugin)
 
     def list_installed_plugins(self):
-        """
-        List all installed plugins along with their details.
-
-        Note:
-            This function prints the names, last updated timestamps, download timestamps,
-            and file details of all installed plugins.
-        """
         print("-" * 50)
         for plugin in reversed(self.local_plugins):
-            print(f"Name: {plugin['name']}")
-            print(f"Last Updated: {plugin['last_updated']}")
-            print(f"Downloaded On: {plugin['download_time']}")
-            for plfile in plugin['files']:
-                opath, fname = os.path.split(plfile['path'])
+            print(f"Name: {plugin.get('name', 'N/A')}")
+            print(f"Last Updated: {plugin.get('last_updated', 0)}")
+            print(f"Downloaded On: {plugin.get('download_time', 0)}")
+            for plfile in plugin.get('files', []):
+                opath, fname = os.path.split(plfile.get('path', ''))
                 if opath:
-                    print(f"  File: {fname}, Online Path: {opath}/, Release: {plfile['release']}")
+                    print(f"  File: {fname}, Online Path: {opath}/, Release: {plfile.get('release', False)}")
                 else:
-                    print(f"  File: {fname}, Release: {plfile['release']}")
+                    print(f"  File: {fname}, Release: {plfile.get('release', False)}")
             print("-" * 50)
 
     def list_online_plugins(self):
-        """
-        List all available online plugins along with their details.
-
-        Note:
-            This function prints the names, descriptions, authors, stars, submitted timestamps,
-            last updated timestamps, licenses, URL identifiers, and tags of all available online plugins.
-        """
         print("-" * 50)
         for plugin in reversed(self.online_plugins):
-            print(f"Name: {plugin['name']}")
-            print(f"Description: {plugin['description']}")
-            print(f"Author: {plugin['author']}")
-            print(f"Stars: {plugin['stars']}")
-            print(f"Submitted: {plugin['submitted']}")
-            print(f"Last Updated: {plugin['last_updated']}")
-            print(f"License: {plugin['license']}")
-            print(f"URL Identifier: {plugin['url_identifier']}")
-            if plugin['name'] in self.plugin_ignore_list:
+            print(f"Name: {plugin.get('name', 'N/A')}")
+            print(f"Description: {plugin.get('description', 'N/A')}")
+            print(f"Author: {plugin.get('author', 'N/A')}")
+            print(f"Stars: {plugin.get('stars', 0)}")
+            print(f"Submitted: {plugin.get('submitted', 0)}")
+            print(f"Last Updated: {plugin.get('last_updated', 0)}")
+            print(f"License: {plugin.get('license', 'N/A')}")
+            print(f"URL Identifier: {plugin.get('url_identifier', 'N/A')}")
+            if plugin.get('name') in self.plugin_ignore_list:
                 print("In Ignore List: True")
-            if plugin['tags']:
+            if plugin.get('tags'):
                 print(f"Tags: {', '.join(plugin['tags'])}")
             print("-" * 50)
 
     def run(self, args):
-        """
-        Main function to run the plugin downloader based on the provided command-line arguments.
-
-        Args:
-            args (argparse.Namespace): Command-line arguments parsed by argparse.
-        """
         self.load_data()
 
         if args.timeoutnow:
@@ -970,7 +820,7 @@ class OpenRCTPluginDownloader:
 
         if args.query or args.number:
             for plugin in args.query:
-                self.print_results(self.sort_plugins_by_key(self.search_plugins(plugin, args.fields, args.number),args.sort))
+                self.print_results(self.sort_plugins_by_key(self.search_plugins(plugin, args.fields, args.number), args.sort))
 
         if args.install:
             for plugin in args.install:
@@ -988,15 +838,16 @@ class OpenRCTPluginDownloader:
 
         self.save_data()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog='orct-pldl.py',
         description='A simple OpenRCT plugin finder and downloader',
         epilog='')
     parser.add_argument('-q', '--query', nargs="+", action='extend', help='search for an online database plugin')
-    parser.add_argument('-n', '--number', type=int, help='search for stars, submitted and last_updated (use g or b in fields to specifie max or min)')
-    parser.add_argument('-f', '--fields', nargs='+', default=['n'], choices=['n','d','a','s','g','b','m','l','i','x','t','r','p'],help='fields to search (n: name (default), d: description, a: author, s: stars, g: above, b: below, x: disable unixtime - number, m: submitted, l: license, i: url_identifier, t: tags, r: only query and number, p: enable partial tag search)')
-    parser.add_argument('-s', '--sort', nargs='+',default=[None], choices=['n', 's', 'm', 'l', 'r'],help='field to sort the results (n: for name, s: stars, m: submitted, l: last_updated, r: reverse results)')
+    parser.add_argument('-n', '--number', type=int, help='search for stars, submitted and last_updated (use g or b in fields to specify max or min)')
+    parser.add_argument('-f', '--fields', nargs='+', default=['n'], choices=['n','d','a','s','g','b','m','l','i','x','t','r','p'], help='fields to search (n: name (default), d: description, a: author, s: stars, g: above, b: below, x: disable unixtime - number, m: submitted, l: license, i: url_identifier, t: tags, r: only query and number, p: enable partial tag search)')
+    parser.add_argument('-s', '--sort', nargs='+', default=[None], choices=['n', 's', 'm', 'l', 'r'], help='field to sort the results (n: for name, s: stars, m: submitted, l: last_updated, r: reverse results)')
     parser.add_argument('-r', '--remove', nargs="+", action='extend', help='remove installed plugin')
     parser.add_argument('-i', '--install', nargs="+", action='extend', help='install online database plugin')
     parser.add_argument('-o', '--ols', action='store_true', help='list indexed online plugins')
