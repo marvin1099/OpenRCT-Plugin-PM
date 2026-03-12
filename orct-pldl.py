@@ -346,7 +346,7 @@ class OpenRCTPluginDownloader:
                 plugin_info = {
                     'name': plugin_data.get('name', ''),
                     'description': plugin_data.get('description', ''),
-                    'author': plugin_data.get('owner', ''),
+                    'author': plugin_data.get('username', ''),
                     'stars': plugin_data.get('stargazers', 0),
                     'submitted': plugin_data.get('submittedAt', 0),
                     'last_updated': plugin_data.get('updatedAt', 0),
